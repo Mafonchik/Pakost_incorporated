@@ -1,90 +1,155 @@
 #pragma once
-#include "lexer.h"
+
+#include "lexer.h" // Подключаем лексер, где объявлены TokenType и Token
 #include <vector>
 #include <string>
+#include <utility>
 #include <stdexcept>
 
-// Описание одной колонки таблицы
-struct ColumnDef {
-    std::string name;
-    TokenType type;          // Ожидаем TYPE_INT или TYPE_STRING
-    bool is_not_null = false;
-    bool is_indexed = false;
+// Значение поля в запросе
+struct ParsedValue {
+    TokenType type = TokenType::NUMBER;
+    std::string value;
+    bool is_string = false;
+    bool is_null = false;
 };
 
-// Описание всей команды CREATE TABLE
+// Определение колонки при создании таблицы
+struct ColumnDef {
+    std::string name;
+    TokenType type; // TokenType::TYPE_INT или TokenType::TYPE_STRING
+    bool is_not_null = false;
+    bool is_indexed = false;
+    bool has_default = false;
+    ParsedValue default_value;
+};
+
+// AST (Abstract Syntax Tree) структуры для разных типов запросов
 struct CreateTableStmt {
     std::string table_name;
     std::vector<ColumnDef> columns;
 };
 
-// Структура для хранения одного значения из VALUES
-struct ParsedValue {
-    TokenType type;      // Ожидаем NUMBER или STRING_LITERAL
-    std::string value;   // Само значение в виде текста
+struct CreateDatabaseStmt {
+    std::string db_name;
 };
 
-// Описание команды INSERT INTO
+struct DropDatabaseStmt {
+    std::string db_name;
+};
+
 struct InsertStmt {
     std::string table_name;
-    std::vector<ParsedValue> values;
+    std::vector<std::string> columns;
+    std::vector<std::vector<ParsedValue>> rows;
 };
 
 struct UseDbStmt {
     std::string db_name;
 };
 
-struct SelectStmt {
-    std::string table_name;
-    std::string column_name; // Какую колонку фильтруем (например, "id")
-    TokenType op_type;       // Тип оператора (OP_EQUAL, OP_LESS, OP_GREATER и т.д.)
-    int search_key; // пока сделаем поиск по точному целочисленному ключу (id)
+// Условия WHERE (поддерживает и равенство, и BETWEEN)
+struct Condition {
+    std::string column;
+    std::string op;          // Например, "=", "!=", "<", ">", etc.
+    ParsedValue value;       // Для обычного сравнения
+    ParsedValue lower;       // Нижняя граница для BETWEEN
+    ParsedValue upper;       // Верхняя граница для BETWEEN
+    bool is_between = false;
+    bool has_where = false;
 };
 
-// В класс Parser нужно добавить объявление нового метода:
-// InsertStmt parseInsert();
+struct SelectStmt {
+    std::string table_name;
+    std::vector<std::string> columns;
+    std::vector<std::string> aliases;
+    bool select_all = false;
+    Condition where;
+    bool has_where = false;
+};
+
+struct UpdateStmt {
+    std::string table_name;
+    std::vector<std::pair<std::string, ParsedValue>> assignments;
+    Condition where;
+    bool has_where = false;
+};
+
+struct DeleteStmt {
+    std::string table_name;
+    Condition where;
+    bool has_where = false;
+};
 
 struct DropTableStmt {
     std::string table_name;
 };
 
-// Класс Парсера
+// Класс синтаксического анализатора (Parser)
 class Parser {
 private:
     std::vector<Token> tokens;
     size_t pos;
 
-    // Вспомогательные методы для навигации по токенам
-    Token peek() const { 
-        return pos < tokens.size() ? tokens[pos] : Token{TokenType::END_OF_FILE, ""}; 
-    }
-    
-    Token advance() { 
-        if (pos < tokens.size()) pos++; 
-        return tokens[pos - 1]; 
-    }
-    
-    bool isAtEnd() const { 
-        return peek().type == TokenType::END_OF_FILE; 
+    // Вспомогательные методы навигации по токенам
+    Token peek() const {
+        return pos < tokens.size() ? tokens[pos] : Token{TokenType::END_OF_FILE, ""};
     }
 
-    // Проверяет текущий токен и "съедает" его, если тип совпадает.
-    // Иначе выбрасывает синтаксическую ошибку (согласно ТЗ валидация обязательна)
+    Token advance() {
+        if (pos < tokens.size()) pos++;
+        return tokens[pos - 1];
+    }
+
+    bool isAtEnd() const {
+        return peek().type == TokenType::END_OF_FILE;
+    }
+
     Token consume(TokenType expected_type, const std::string& error_message) {
         if (peek().type == expected_type) {
             return advance();
         }
-        throw std::runtime_error("Синтаксическая ошибка: " + error_message + 
-                                 " Получено: '" + peek().value + "'");
+        throw std::runtime_error("Синтаксическая ошибка: " + error_message + " Получено: '" + peek().value + "'.");
     }
 
-public:
-    Parser(const std::vector<Token>& token_list) : tokens(token_list), pos(0) {}
+    std::string parseQualifiedName() {
+        std::string result = consume(TokenType::IDENTIFIER, "Ожидалось имя сущности.").value;
+        if (peek().type == TokenType::DOT) {
+            advance();
+            result += "." + consume(TokenType::IDENTIFIER, "Ожидалось имя после '.'.").value;
+        }
+        return result;
+    }
 
-    // Метод парсинга CREATE TABLE
+    ParsedValue parseValue() {
+        Token token = peek();
+        if (token.type == TokenType::NUMBER || 
+            token.type == TokenType::STRING_LITERAL || 
+            token.type == TokenType::IDENTIFIER || 
+            token.type == TokenType::NULL_VAL) {
+            advance();
+            ParsedValue value;
+            value.type = token.type;
+            value.value = token.value;
+            value.is_string = (token.type == TokenType::STRING_LITERAL || token.type == TokenType::IDENTIFIER);
+            value.is_null = (token.type == TokenType::NULL_VAL);
+            return value;
+        }
+        throw std::runtime_error("Синтаксическая ошибка: ожидалось значение, получено '" + token.value + "'.");
+    }
+
+    Condition parseCondition();
+
+public:
+    explicit Parser(const std::vector<Token>& token_list) : tokens(token_list), pos(0) {}
+
+    CreateDatabaseStmt parseCreateDatabase();
+    DropDatabaseStmt parseDropDatabase();
     CreateTableStmt parseCreateTable();
     InsertStmt parseInsert();
     SelectStmt parseSelect();
+    UpdateStmt parseUpdate();
+    DeleteStmt parseDelete();
     UseDbStmt parseUse();
     DropTableStmt parseDropTable();
 };

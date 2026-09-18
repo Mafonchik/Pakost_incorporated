@@ -1,169 +1,268 @@
 #include "parser.h"
-#include <iostream>
-#include <unordered_set> // Добавлено для проверки дубликатов колонок
+#include <unordered_set>
+#include <vector>
+
+CreateDatabaseStmt Parser::parseCreateDatabase() {
+    consume(TokenType::CREATE, "Ожидалось ключевое слово 'CREATE'.");
+    consume(TokenType::DATABASE, "Ожидалось ключевое слово 'DATABASE'.");
+    CreateDatabaseStmt stmt;
+    stmt.db_name = parseQualifiedName();
+    consume(TokenType::SEMICOLON, "Ожидалась ';' в конце команды.");
+    return stmt;
+}
+
+Condition Parser::parseCondition() {
+    Condition condition;
+    condition.column = consume(TokenType::IDENTIFIER, "Ожидалось имя столбца в условии.").value;
+
+    Token op = peek();
+    if (op.type == TokenType::OP_EQUAL || op.type == TokenType::ASSIGN || 
+        op.type == TokenType::OP_NOT_EQUAL ||
+        op.type == TokenType::OP_LESS || op.type == TokenType::OP_GREATER ||
+        op.type == TokenType::OP_LESS_EQ || op.type == TokenType::OP_GREATER_EQ) {
+        advance();
+        condition.op = (op.type == TokenType::ASSIGN) ? "=" : op.value; // Нормализуем в "=" если пришел ASSIGN
+        condition.value = parseValue();
+        condition.has_where = true;
+        return condition;
+    }
+
+    if (op.type == TokenType::BETWEEN) {
+        advance();
+        condition.op = "BETWEEN";
+        condition.lower = parseValue();
+        consume(TokenType::AND, "Ожидалось ключевое слово 'AND' после нижней границы.");
+        condition.upper = parseValue();
+        condition.is_between = true;
+        condition.has_where = true;
+        return condition;
+    }
+
+    if (op.type == TokenType::LIKE) {
+        advance();
+        condition.op = "LIKE";
+        condition.value = parseValue();
+        condition.has_where = true;
+        return condition;
+    }
+
+    throw std::runtime_error("Синтаксическая ошибка: ожидался оператор сравнения, BETWEEN или LIKE.");
+}
 
 CreateTableStmt Parser::parseCreateTable() {
     CreateTableStmt stmt;
-    std::unordered_set<std::string> seen_columns; // Множество для контроля уникальности имен
+    std::unordered_set<std::string> seen_columns;
 
-    // 1. Ожидаем ключевые слова CREATE и TABLE
     consume(TokenType::CREATE, "Ожидалось ключевое слово 'CREATE'.");
     consume(TokenType::TABLE, "Ожидалось ключевое слово 'TABLE'.");
-
-    // 2. Имя таблицы
-    Token name_token = consume(TokenType::IDENTIFIER, "Ожидалось имя таблицы.");
-    stmt.table_name = name_token.value;
-
-    // 3. Открывающая круглая скобка
+    stmt.table_name = parseQualifiedName();
     consume(TokenType::PAREN_LEFT, "Ожидалась '(' после имени таблицы.");
 
-    // 4. Парсинг колонок (как минимум одна должна быть)
+    // Читаем колонки в цикле
     do {
-        ColumnDef col;
-        
-        // Имя колонки
-        Token col_name = consume(TokenType::IDENTIFIER, "Ожидалось имя колонки.");
-        col.name = col_name.value;
-
-        // Проверяем, встречалась ли уже такая колонка в текущей таблице
-        if (seen_columns.find(col.name) != seen_columns.end()) {
-            throw std::runtime_error("Ошибка семантики: дублирование имени колонки '" + col.name + "' в таблице '" + stmt.table_name + "'.");
+        ColumnDef column;
+        column.name = consume(TokenType::IDENTIFIER, "Ожидалось имя колонки.").value;
+        if (seen_columns.find(column.name) != seen_columns.end()) {
+            throw std::runtime_error("Ошибка семантики: дублирование имени колонки '" + column.name + "'.");
         }
-        seen_columns.insert(col.name);
+        seen_columns.insert(column.name);
 
-        // Тип колонки (INT или STRING)
-        Token col_type = advance();
-        if (col_type.type == TokenType::TYPE_INT || col_type.type == TokenType::TYPE_STRING) {
-            col.type = col_type.type;
+        Token type_token = peek();
+        if (type_token.type == TokenType::TYPE_INT || type_token.type == TokenType::TYPE_STRING) {
+            advance();
+            column.type = type_token.type;
         } else {
-            throw std::runtime_error("Неизвестный тип данных для колонки '" + col.name + "'. Ожидался INT или STRING.");
+            throw std::runtime_error("Неизвестный тип данных для колонки '" + column.name + "'.");
         }
 
-        // Модификаторы (NOT_NULL, INDEXED). Они опциональны.
-        if (peek().type == TokenType::NOT_NULL) {
-            col.is_not_null = true;
-            advance();
-        } else if (peek().type == TokenType::INDEXED) {
-            col.is_indexed = true;
-            // По ТЗ INDEXED уникально и не может быть NULL
-            col.is_not_null = true; 
-            advance();
+        while (peek().type == TokenType::NOT_NULL || peek().type == TokenType::INDEXED || peek().type == TokenType::DEFAULT) {
+            Token modifier = advance();
+            if (modifier.type == TokenType::NOT_NULL) {
+                column.is_not_null = true;
+            } else if (modifier.type == TokenType::INDEXED) {
+                column.is_indexed = true;
+                column.is_not_null = true;
+            } else if (modifier.type == TokenType::DEFAULT) {
+                column.has_default = true;
+                column.default_value = parseValue();
+            }
         }
 
-        stmt.columns.push_back(col);
+        stmt.columns.push_back(column);
 
-        // Если следующий токен — запятая, значит будет еще одна колонка.
-    } while (peek().type == TokenType::COMMA && advance().type == TokenType::COMMA);
+        // Если дальше идет запятая, значит, есть еще колонки
+        if (peek().type == TokenType::COMMA) {
+            advance();
+            continue;
+        } 
+        break; // Если запятой нет, выходим из цикла колонок
+    } while (true);
 
-    // 5. Закрывающая круглая скобка
     consume(TokenType::PAREN_RIGHT, "Ожидалась ')' в конце определения колонок.");
-
-    // 6. Точка с запятой (согласно ТЗ все команды завершаются ';')
     consume(TokenType::SEMICOLON, "Ожидалась ';' в конце команды.");
+    return stmt;
+}
 
+DropDatabaseStmt Parser::parseDropDatabase() {
+    consume(TokenType::DROP, "Ожидалось ключевое слово 'DROP'.");
+    consume(TokenType::DATABASE, "Ожидалось ключевое слово 'DATABASE'.");
+    DropDatabaseStmt stmt;
+    stmt.db_name = consume(TokenType::IDENTIFIER, "Ожидалось имя базы данных.").value;
+    consume(TokenType::SEMICOLON, "Ожидалась ';' в конце команды.");
     return stmt;
 }
 
 InsertStmt Parser::parseInsert() {
     InsertStmt stmt;
-
-    // 1. Ожидаем 'INSERT', 'INTO' и имя таблицы
     consume(TokenType::INSERT, "Ожидалось ключевое слово 'INSERT'.");
     consume(TokenType::INTO, "Ожидалось ключевое слово 'INTO'.");
+    stmt.table_name = parseQualifiedName();
 
-    Token name_token = consume(TokenType::IDENTIFIER, "Ожидалось имя таблицы.");
-    stmt.table_name = name_token.value;
+    if (peek().type == TokenType::PAREN_LEFT) {
+        advance();
+        do {
+            stmt.columns.push_back(consume(TokenType::IDENTIFIER, "Ожидалось имя колонки.").value);
+            if (peek().type == TokenType::COMMA) {
+                advance();
+            } else {
+                break;
+            }
+        } while (true);
+        consume(TokenType::PAREN_RIGHT, "Ожидалась ')' после списка колонок.");
+    }
 
-    // 2. Ожидаем ключевое слово 'VALUES' и открывающую скобку
-    consume(TokenType::VALUES, "Ожидалось ключевое слово 'VALUES'.");
-    consume(TokenType::PAREN_LEFT, "Ожидалась '(' после VALUES.");
+    if (peek().type == TokenType::VALUE || peek().type == TokenType::VALUES) {
+        advance();
+    } else {
+        throw std::runtime_error("Ожидалось ключевое слово 'VALUE' или 'VALUES'.");
+    }
 
-    // 3. Считываем переданные значения
     do {
-        Token val_token = advance();
-        
-        // Значение должно быть либо числом, либо строкой в кавычках
-        if (val_token.type == TokenType::NUMBER || val_token.type == TokenType::STRING_LITERAL) {
-            stmt.values.push_back({val_token.type, val_token.value});
-        } else {
-            throw std::runtime_error("Синтаксическая ошибка: ожидалось число или строка внутри VALUES, получено '" + val_token.value + "'.");
+        consume(TokenType::PAREN_LEFT, "Ожидалась '(' после VALUE.");
+        std::vector<ParsedValue> row;
+        do {
+            row.push_back(parseValue());
+            if (peek().type == TokenType::COMMA) {
+                advance();
+                if (peek().type == TokenType::PAREN_RIGHT) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        } while (true);
+        consume(TokenType::PAREN_RIGHT, "Ожидалась ')' в конце значения строки.");
+        stmt.rows.push_back(row);
+        if (peek().type == TokenType::COMMA) {
+            advance();
+            if (peek().type == TokenType::PAREN_LEFT) {
+                continue;
+            }
+            throw std::runtime_error("Ожидался новый набор значений после запятой.");
         }
+        break;
+    } while (true);
 
-        // Проверяем, есть ли запятая. Если да — идем на следующий круг цикла.
-    } while (peek().type == TokenType::COMMA && advance().type == TokenType::COMMA);
-
-    // 4. Закрывающая скобка и точка с запятой
-    consume(TokenType::PAREN_RIGHT, "Ожидалась ')' в конце списка значений.");
     consume(TokenType::SEMICOLON, "Ожидалась ';' в конце команды.");
-
     return stmt;
 }
 
 SelectStmt Parser::parseSelect() {
-    consume(TokenType::SELECT, "Ожидалось ключевое слово SELECT");
-    
+    SelectStmt stmt;
+    consume(TokenType::SELECT, "Ожидалось ключевое слово SELECT.");
+
     if (peek().type == TokenType::ASTERISK) {
         advance();
-    } // (Позже здесь добавим парсинг списка колонок)
-
-    consume(TokenType::FROM, "Ожидалось ключевое слово FROM");
-    
-    Token table_token = consume(TokenType::IDENTIFIER, "Ожидалось имя таблицы");
-    std::string table_name = table_token.value;
-
-    consume(TokenType::WHERE, "Ожидалось ключевое слово WHERE");
-    
-    Token col_token = consume(TokenType::IDENTIFIER, "Ожидалось имя колонки для поиска");
-    std::string column_name = col_token.value;
-
-    // Ловим любой оператор сравнения из тех, что умеет лексер
-    Token op_token = peek();
-    if (op_token.type == TokenType::OP_EQUAL || 
-        op_token.type == TokenType::OP_NOT_EQUAL || 
-        op_token.type == TokenType::OP_LESS || 
-        op_token.type == TokenType::OP_GREATER || 
-        op_token.type == TokenType::OP_LESS_EQ || 
-        op_token.type == TokenType::OP_GREATER_EQ) {
-        advance();
+        stmt.select_all = true;
+        stmt.columns.push_back("*");
     } else {
-        throw std::runtime_error("Синтаксическая ошибка: ожидался оператор сравнения (=, !=, <, >, <=, >=)");
+        do {
+            std::string column_name = consume(TokenType::IDENTIFIER, "Ожидалось имя колонки.").value;
+            stmt.columns.push_back(column_name);
+            if (peek().type == TokenType::AS) {
+                advance();
+                stmt.aliases.push_back(consume(TokenType::IDENTIFIER, "Ожидалось имя алиаса.").value);
+            } else {
+                stmt.aliases.push_back("");
+            }
+            if (peek().type == TokenType::COMMA) {
+                advance();
+                continue;
+            }
+            break;
+        } while (true);
     }
 
-    Token val_token = consume(TokenType::NUMBER, "Ожидалось числовое значение");
-    int value = std::stoi(val_token.value);
+    consume(TokenType::FROM, "Ожидалось ключевое слово FROM.");
+    stmt.table_name = parseQualifiedName();
 
-    if (peek().type == TokenType::SEMICOLON) {
+    if (peek().type == TokenType::WHERE) {
         advance();
+        stmt.where = parseCondition();
+        stmt.has_where = true;
     }
 
-    return SelectStmt{table_name, column_name, op_token.type, value};
+    consume(TokenType::SEMICOLON, "Ожидалась ';' в конце команды.");
+    return stmt;
 }
 
-DropTableStmt Parser::parseDropTable() {
-    // Ожидаем: DROP TABLE table_name;
-    
-    consume(TokenType::DROP, "Ожидалось ключевое слово DROP");
-    consume(TokenType::TABLE, "Ожидалось ключевое слово TABLE");
-    
-    Token table_token = consume(TokenType::IDENTIFIER, "Ожидалось имя таблицы");
-    std::string table_name = table_token.value;
+UpdateStmt Parser::parseUpdate() {
+    UpdateStmt stmt;
+    consume(TokenType::UPDATE, "Ожидалось ключевое слово UPDATE.");
+    stmt.table_name = parseQualifiedName();
+    consume(TokenType::SET, "Ожидалось ключевое слово SET.");
 
-    if (peek().type == TokenType::SEMICOLON) {
+    do {
+        std::string column_name = consume(TokenType::IDENTIFIER, "Ожидалось имя колонки.").value;
+        consume(TokenType::ASSIGN, "Ожидалось '=' в выражении SET.");
+        ParsedValue value = parseValue();
+        stmt.assignments.emplace_back(column_name, value);
+        if (peek().type == TokenType::COMMA) {
+            advance();
+            continue;
+        }
+        break;
+    } while (true);
+
+    if (peek().type == TokenType::WHERE) {
         advance();
+        stmt.where = parseCondition();
+        stmt.has_where = true;
     }
 
-    return DropTableStmt{table_name};
+    consume(TokenType::SEMICOLON, "Ожидалась ';' в конце команды.");
+    return stmt;
+}
+
+DeleteStmt Parser::parseDelete() {
+    DeleteStmt stmt;
+    consume(TokenType::DELETE, "Ожидалось ключевое слово DELETE.");
+    consume(TokenType::FROM, "Ожидалось ключевое слово FROM.");
+    stmt.table_name = parseQualifiedName();
+
+    if (peek().type == TokenType::WHERE) {
+        advance();
+        stmt.where = parseCondition();
+        stmt.has_where = true;
+    }
+
+    consume(TokenType::SEMICOLON, "Ожидалась ';' в конце команды.");
+    return stmt;
 }
 
 UseDbStmt Parser::parseUse() {
-    consume(TokenType::USE, "Ожидалось ключевое слово USE");
-    
-    Token db_token = consume(TokenType::IDENTIFIER, "Ожидалось имя базы данных");
-    std::string db_name = db_token.value;
+    consume(TokenType::USE, "Ожидалось ключевое слово 'USE'.");
+    UseDbStmt stmt;
+    stmt.db_name = parseQualifiedName();
+    consume(TokenType::SEMICOLON, "Ожидалась ';' в конце команды.");
+    return stmt;
+}
 
-    if (peek().type == TokenType::SEMICOLON) {
-        advance();
-    }
-
-    return UseDbStmt{db_name};
+DropTableStmt Parser::parseDropTable() {
+    consume(TokenType::DROP, "Ожидалось ключевое слово 'DROP'.");
+    consume(TokenType::TABLE, "Ожидалось ключевое слово 'TABLE'.");
+    DropTableStmt stmt;
+    stmt.table_name = parseQualifiedName();
+    consume(TokenType::SEMICOLON, "Ожидалась ';' в конце команды.");
+    return stmt;
 }
