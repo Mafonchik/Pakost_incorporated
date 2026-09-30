@@ -24,8 +24,8 @@ enum class TokenType {
     PAREN_RIGHT,
     COMMA,
     DOT,
-    ASTERISK,
-    SEMICOLON,
+    ASTERISK, // *
+    SEMICOLON, // ;
     END_OF_FILE
 };
 

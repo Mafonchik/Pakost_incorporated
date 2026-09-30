@@ -101,7 +101,7 @@ CreateTableStmt Parser::parseCreateTable() {
     do {
         ColumnDef column;
         column.name = consume(TokenType::IDENTIFIER, "Ожидалось имя колонки.").value;
-        if (!seen_columns.insert(column.name).second) {
+        if (!seen_columns.insert(column.name).second) { // если second = false - дубликат
             throw std::runtime_error("Ошибка семантики: дублирование имени колонки '" + column.name + "'.");
         }
 

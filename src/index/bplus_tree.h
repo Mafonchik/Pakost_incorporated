@@ -7,7 +7,7 @@
 #include <cstdint>
 
 using FileOffset = uint64_t;
-constexpr FileOffset INVALID_OFFSET = static_cast<FileOffset>(-1);
+const FileOffset INVALID_OFFSET = static_cast<FileOffset>(-1);
 
 template <typename T>
 struct BPlusNode {
@@ -243,7 +243,6 @@ public:
             return current->record_pointers[idx];
         }
         
-        // Заменили возврат 0 на INVALID_OFFSET
         return INVALID_OFFSET;
     }
 
