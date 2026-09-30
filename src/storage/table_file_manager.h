@@ -16,7 +16,6 @@ private:
     std::string filename;
 
 public:
-    // Конструктор и деструктор
     TableFileManager(const std::string& name);
     ~TableFileManager();
 

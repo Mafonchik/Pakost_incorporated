@@ -1,109 +1,179 @@
-#include <iostream>
-#include <fstream>
-#include <string>
+#include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <string>
 #include "parser/lexer.h"
 #include "parser/parser.h"
 #include "core/executor.h"
 #include "logger.h"
 
-void processLine(QueryExecutor& executor, const std::string& line) {
-    if (line.empty()) return;
+namespace {
+
+constexpr int CODE_OK = 0;
+constexpr int CODE_SYNTAX_ERROR = 1;
+constexpr int CODE_EXEC_ERROR = 2;
+constexpr int CODE_INTERNAL_ERROR = 3;
+
+constexpr uint32_t CLIENT_ID = 1;
+constexpr uint32_t WORKER_ID = 1;
+
+std::string trim(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    return s.substr(b, e - b);
+}
+
+std::function<void()> compileStatement(QueryExecutor& ex, const std::string& text) {
+    Lexer lexer(text);
+    std::vector<Token> tokens = lexer.tokenize();
+    Parser parser(tokens);
+
+    TokenType first = tokens[0].type;
+    TokenType second = tokens.size() > 1 ? tokens[1].type : TokenType::END_OF_FILE;
+
+    if (first == TokenType::CREATE && second == TokenType::DATABASE) {
+        auto s = parser.parseCreateDatabase();
+        return [&ex, s] { ex.executeCreateDatabase(s); };
+    }
+    if (first == TokenType::CREATE && second == TokenType::TABLE) {
+        auto s = parser.parseCreateTable();
+        return [&ex, s] { ex.executeCreateTable(s); };
+    }
+    if (first == TokenType::DROP && second == TokenType::DATABASE) {
+        auto s = parser.parseDropDatabase();
+        return [&ex, s] { ex.executeDropDatabase(s); };
+    }
+    if (first == TokenType::DROP && second == TokenType::TABLE) {
+        auto s = parser.parseDropTable();
+        return [&ex, s] { ex.executeDropTable(s); };
+    }
+    if (first == TokenType::CREATE || first == TokenType::DROP) {
+        throw std::runtime_error("Синтаксическая ошибка: после " + tokens[0].value + " ожидалось DATABASE или TABLE.");
+    }
+    if (first == TokenType::USE) {
+        auto s = parser.parseUse();
+        return [&ex, s] { ex.executeUse(s); };
+    }
+    if (first == TokenType::INSERT) {
+        auto s = parser.parseInsert();
+        return [&ex, s] { ex.executeInsert(s); };
+    }
+    if (first == TokenType::SELECT) {
+        auto s = parser.parseSelect();
+        return [&ex, s] { ex.executeSelect(s); };
+    }
+    if (first == TokenType::UPDATE) {
+        auto s = parser.parseUpdate();
+        return [&ex, s] { ex.executeUpdate(s); };
+    }
+    if (first == TokenType::DELETE) {
+        auto s = parser.parseDelete();
+        return [&ex, s] { ex.executeDelete(s); };
+    }
+    throw std::runtime_error("Синтаксическая ошибка: неизвестная или неподдерживаемая команда.");
+}
+
+void processStatement(QueryExecutor& executor, AccessLogger& logger, const std::string& raw) {
+    std::string text = trim(raw);
+    if (text.empty()) return;
+
+    auto start = std::chrono::system_clock::now();
+    int code = CODE_OK;
+    std::string status = "OK";
 
     try {
-        // 1. Лексический анализ
-        Lexer lexer(line);
-        auto tokens = lexer.tokenize();
-        if (tokens.empty() || tokens[0].type == TokenType::END_OF_FILE) {
+        std::function<void()> action;
+        try {
+            action = compileStatement(executor, text);
+        } catch (const std::exception& e) {
+            code = CODE_SYNTAX_ERROR;
+            throw;
+        }
+        try {
+            action();
+        } catch (const std::exception& e) {
+            code = CODE_EXEC_ERROR;
+            throw;
+        }
+    } catch (const std::exception& e) {
+        status = e.what();
+        std::cerr << "ОШИБКА: " << e.what() << "\n";
+    } catch (...) {
+        code = CODE_INTERNAL_ERROR;
+        status = "unknown error";
+        std::cerr << "ОШИБКА: Внутренняя ошибка.\n";
+    }
+
+    logger.log(text, CLIENT_ID, WORKER_ID, start, std::chrono::system_clock::now(), code, status);
+}
+
+class StatementReader {
+    std::string buf_;
+    bool in_string_ = false;
+
+public:
+    void feed(const std::string& line, const std::function<void(const std::string&)>& on_statement) {
+        for (char c : line) {
+            buf_ += c;
+            if (c == '"') {
+                in_string_ = !in_string_;
+            } else if (c == ';' && !in_string_) {
+                on_statement(buf_);
+                buf_.clear();
+            }
+        }
+        buf_ += '\n';
+    }
+
+    bool hasPending() const { return !trim(buf_).empty(); }
+    const std::string& pending() const { return buf_; }
+};
+
+bool isExitCommand(const std::string& line) {
+    std::string t = trim(line);
+    std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) { return std::tolower(c); });
+    return t == "exit" || t == "exit;";
+}
+
+void runStream(std::istream& in, QueryExecutor& executor, AccessLogger& logger, bool interactive) {
+    StatementReader reader;
+    std::string line;
+    auto handler = [&](const std::string& stmt) { processStatement(executor, logger, stmt); };
+
+    while (std::getline(in, line)) {
+        if (interactive && !reader.hasPending() && isExitCommand(line)) {
+            std::cout << "Выход из программы...\n";
             return;
         }
-
-        // 2. Синтаксический анализ
-        Parser parser(tokens);
-        TokenType first_type = tokens[0].type;
-
-        if (first_type == TokenType::CREATE) {
-            if (tokens.size() > 1 && tokens[1].type == TokenType::DATABASE) {
-                CreateDatabaseStmt stmt = parser.parseCreateDatabase();
-                executor.executeCreateDatabase(stmt);
-            } else if (tokens.size() > 1 && tokens[1].type == TokenType::TABLE) {
-                CreateTableStmt stmt = parser.parseCreateTable();
-                executor.executeCreateTable(stmt);
-            } else {
-                throw std::runtime_error("Неизвестная команда после CREATE.");
-            }
-        } 
-        else if (first_type == TokenType::DROP) {
-            if (tokens.size() > 1 && tokens[1].type == TokenType::DATABASE) {
-                DropDatabaseStmt stmt = parser.parseDropDatabase();
-                executor.executeDropDatabase(stmt);
-            } else if (tokens.size() > 1 && tokens[1].type == TokenType::TABLE) {
-                DropTableStmt stmt = parser.parseDropTable();
-                executor.executeDropTable(stmt);
-            }
-        }
-        else if (first_type == TokenType::USE) {
-            UseDbStmt stmt = parser.parseUse();
-            executor.executeUse(stmt);
-        }
-        else if (first_type == TokenType::INSERT) {
-            InsertStmt stmt = parser.parseInsert();
-            executor.executeInsert(stmt);
-        }
-        else if (first_type == TokenType::SELECT) {
-            SelectStmt stmt = parser.parseSelect();
-            executor.executeSelect(stmt);
-        }
-        else if (first_type == TokenType::UPDATE) {
-            UpdateStmt stmt = parser.parseUpdate();
-            executor.executeUpdate(stmt);
-        }
-        else if (first_type == TokenType::DELETE) {
-            DeleteStmt stmt = parser.parseDelete();
-            executor.executeDelete(stmt);
-        }
-        else {
-            throw std::runtime_error("Неизвестная или неподдерживаемая команда.");
-        }
-
-    } catch (const std::exception& e) {
-        std::cerr << "[ОШИБКА] " << e.what() << "\n";
+        reader.feed(line, handler);
     }
+
+    if (reader.hasPending()) {
+        std::cerr << "ОШИБКА: Команда не завершена символом ';': " << trim(reader.pending()) << "\n";
+    }
+}
+
 }
 
 int main(int argc, char* argv[]) {
     AccessLogger logger("access.log");
     QueryExecutor executor;
 
-    uint32_t client_id = 1; // ID текущей сессии/клиента
-    uint32_t worker_id = 1; // ID потока-обработчика
-
-    // Режим 1: Выполнение SQL-скрипта из файла (аргумент командной строки)
     if (argc > 1) {
         std::ifstream file(argv[1]);
         if (!file.is_open()) {
-            std::cerr << "[ОШИБКА] Не удалось открыть файл: " << argv[1] << "\n";
+            std::cerr << "ОШИБКА: Не удалось открыть файл: " << argv[1] << "\n";
             return 1;
         }
-
-        std::string line;
-        while (std::getline(file, line)) {
-            processLine(executor, line);
-        }
+        runStream(file, executor, logger, false);
         return 0;
     }
 
-    // Режим 2: Интерактивный консольный режим
-    std::cout << "Введите SQL-запросы. Для выхода введите EXIT;\n\n";
-
-    std::string line;
-    while (std::getline(std::cin, line)) {
-        if (line == "EXIT;" || line == "exit" || line == "EXIT") {
-            std::cout << "Выход из программы...\n";
-            break;
-        }
-        processLine(executor, line);
-    }
-
+    std::cout << "Введите SQL-запросы (команды завершаются ';', можно писать в несколько строк). Для выхода: EXIT;\n\n";
+    runStream(std::cin, executor, logger, true);
     return 0;
 }

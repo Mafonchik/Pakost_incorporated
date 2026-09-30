@@ -15,7 +15,7 @@ struct BPlusNode {
     std::vector<T> keys;
     std::vector<BPlusNode<T>*> children;
     std::vector<FileOffset> record_pointers; // Смещения записей в файле для листьев
-    BPlusNode<T>* next_leaf;                 // Указатель на следующий лист
+    BPlusNode<T>* next_leaf;
 
     explicit BPlusNode(bool leaf) : is_leaf(leaf), next_leaf(nullptr) {}
 };
@@ -24,7 +24,7 @@ template <typename T>
 class BPlusTree {
 private:
     BPlusNode<T>* root;
-    int t; // Минимальная степень B+ дерева
+    int t;
 
     void splitChild(BPlusNode<T>* parent, size_t child_index, BPlusNode<T>* child) {
         BPlusNode<T>* z = new BPlusNode<T>(child->is_leaf);
@@ -85,7 +85,7 @@ private:
 
             if (node->children[i]->keys.size() == static_cast<size_t>(2 * t - 1)) {
                 splitChild(node, i, node->children[i]);
-                if (node->keys[i] < key) {
+                if (!(key < node->keys[i])) {
                     i++;
                 }
             }
@@ -96,7 +96,6 @@ private:
 
     void removeInternal(BPlusNode<T>* node, const T& key) {
         if (node->is_leaf) {
-            // В листе ищем точное совпадение
             auto it = std::lower_bound(node->keys.begin(), node->keys.end(), key);
             if (it != node->keys.end() && *it == key) {
                 size_t idx = std::distance(node->keys.begin(), it);
@@ -106,36 +105,28 @@ private:
             return;
         }
 
-        // Внутренний узел: спускаемся к потомку.
-        // Используем upper_bound, чтобы правильно маршрутизировать поиск.
         auto it = std::upper_bound(node->keys.begin(), node->keys.end(), key);
         size_t child_idx = std::distance(node->keys.begin(), it);
 
         BPlusNode<T>* child = node->children[child_idx];
         removeInternal(child, key);
 
-        // Балансируем дерево при возврате из рекурсии, если элементов стало меньше t-1
         if (child->keys.size() < static_cast<size_t>(t - 1)) {
             balance(node, child_idx);
         }
     }
 
     void balance(BPlusNode<T>* parent, size_t child_idx) {
-        BPlusNode<T>* child = parent->children[child_idx];
-
-        // Пробуем одолжить у левого соседа
         if (child_idx > 0 && parent->children[child_idx - 1]->keys.size() >= static_cast<size_t>(t)) {
             borrowFromPrev(parent, child_idx);
             return;
         }
         
-        // Пробуем одолжить у правого соседа
         if (child_idx < parent->children.size() - 1 && parent->children[child_idx + 1]->keys.size() >= static_cast<size_t>(t)) {
             borrowFromNext(parent, child_idx);
             return;
         }
 
-        // Если одолжить нельзя — сливаем узлы
         if (child_idx < parent->children.size() - 1) {
             merge(parent, child_idx);
         } else {
@@ -237,7 +228,7 @@ public:
         destroyNode(root);
     }
 
-    FileOffset search(T key) {
+    FileOffset search(const T& key) const {
         BPlusNode<T>* current = root;
         
         while (!current->is_leaf) {
@@ -251,7 +242,7 @@ public:
             size_t idx = std::distance(current->keys.begin(), it);
             return current->record_pointers[idx];
         }
-
+        
         // Заменили возврат 0 на INVALID_OFFSET
         return INVALID_OFFSET;
     }
@@ -269,39 +260,42 @@ public:
         }
     }
 
-    std::vector<FileOffset> range_search(T start_key, T end_key) {
+    std::vector<FileOffset> range_search(const T* lo, const T* hi) const {
         std::vector<FileOffset> result;
         BPlusNode<T>* current = root;
-        
+
         while (!current->is_leaf) {
-            auto it = std::upper_bound(current->keys.begin(), current->keys.end(), start_key);
-            size_t idx = std::distance(current->keys.begin(), it);
+            size_t idx = 0;
+            if (lo) {
+                auto it = std::upper_bound(current->keys.begin(), current->keys.end(), *lo);
+                idx = std::distance(current->keys.begin(), it);
+            }
             current = current->children[idx];
         }
 
         while (current != nullptr) {
             for (size_t i = 0; i < current->keys.size(); ++i) {
-                // Если вышли за верхнюю границу диапазона, прерываем поиск
-                if (current->keys[i] > end_key) {
-                    return result; 
+                if (hi && current->keys[i] > *hi) {
+                    return result;
                 }
-                
-                if (current->keys[i] >= start_key) {
+                if (!lo || current->keys[i] >= *lo) {
                     result.push_back(current->record_pointers[i]);
                 }
             }
             current = current->next_leaf;
         }
-
         return result;
     }
-    
+
+    std::vector<FileOffset> range_search(const T& start_key, const T& end_key) const {
+        return range_search(&start_key, &end_key);
+    }
+
     void remove(T key) {
         if (!root) return;
 
         removeInternal(root, key);
 
-        // Если корень стал пустым, но он не лист — понижаем высоту дерева
         if (root->keys.empty() && !root->is_leaf) {
             BPlusNode<T>* tmp = root;
             root = root->children[0]; 
@@ -315,13 +309,11 @@ public:
         
         if (!current) return result;
 
-        // Спускаемся к самому левому листу
         while (!current->is_leaf) {
             if (current->children.empty()) break;
             current = current->children[0];
         }
 
-        // Проходим по связанному списку листьев
         while (current != nullptr) {
             for (size_t i = 0; i < current->keys.size(); ++i) {
                 result.push_back({current->keys[i], current->record_pointers[i]});

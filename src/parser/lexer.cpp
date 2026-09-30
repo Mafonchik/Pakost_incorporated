@@ -24,7 +24,6 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"BETWEEN", TokenType::BETWEEN},
     {"AND", TokenType::AND},
     {"LIKE", TokenType::LIKE},
-    {"DEFAULT", TokenType::DEFAULT},
     {"INT", TokenType::TYPE_INT},
     {"STRING", TokenType::TYPE_STRING},
     {"NOT_NULL", TokenType::NOT_NULL},
@@ -124,6 +123,9 @@ std::vector<Token> Lexer::tokenize() {
             while (!isAtEnd() && std::isdigit(static_cast<unsigned char>(peek()))) {
                 num_str += advance();
             }
+            if (!isAtEnd() && (std::isalpha(static_cast<unsigned char>(peek())) || peek() == '_')) {
+                throw std::runtime_error("Лексическая ошибка: имя не может начинаться с цифры ('" + num_str + peek() + "...').");
+            }
             tokens.push_back(Token{TokenType::NUMBER, num_str});
             continue;
         }
@@ -134,10 +136,6 @@ std::vector<Token> Lexer::tokenize() {
                 word += advance();
             }
 
-            if (!isValidCasing(word)) {
-                throw std::runtime_error("Лексическая ошибка: недопустимое смешение регистров в '" + word + "'.");
-            }
-
             std::string upper_word = word;
             std::transform(upper_word.begin(), upper_word.end(), upper_word.begin(), [](unsigned char ch) {
                 return static_cast<char>(std::toupper(ch));
@@ -145,6 +143,9 @@ std::vector<Token> Lexer::tokenize() {
 
             auto it = keywords.find(upper_word);
             if (it != keywords.end()) {
+                if (!isValidCasing(word)) {
+                    throw std::runtime_error("Лексическая ошибка: недопустимое смешение регистров в ключевом слове '" + word + "'.");
+                }
                 tokens.push_back(Token{it->second, upper_word});
             } else {
                 tokens.push_back(Token{TokenType::IDENTIFIER, word});

@@ -1,72 +1,65 @@
 #include "database.h"
 
 #include <filesystem>
-#include <fstream>
-#include <iostream>
 #include <stdexcept>
 
-Database::Database(std::string name) : db_name(std::move(name)) {
-    root_dir = "./data/" + db_name;
-    std::filesystem::create_directories(root_dir);
+namespace fs = std::filesystem;
+
+std::string Database::pathFor(const std::string& name) {
+    return std::string(dataRoot()) + "/" + name;
+}
+
+bool Database::existsOnDisk(const std::string& name) {
+    std::error_code ec;
+    return fs::is_directory(pathFor(name), ec);
+}
+
+Database::Database(std::string name, bool create)
+    : db_name(std::move(name)), root_dir(pathFor(db_name)) {
+    if (create) {
+        fs::create_directories(root_dir);
+        return;
+    }
+
+    if (!existsOnDisk(db_name)) {
+        throw std::runtime_error("Ошибка: база данных '" + db_name + "' не существует.");
+    }
+
+    for (const auto& entry : fs::directory_iterator(root_dir)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".meta") {
+            std::string table_name = entry.path().stem().string();
+            tables[table_name] = std::make_unique<Table>(table_name, root_dir);
+        }
+    }
 }
 
 void Database::createTable(const CreateTableStmt& stmt) {
-    // Используем .db единообразно для всей СУБД
-    std::string file_path = root_dir + "/" + stmt.table_name + ".db"; 
-    
-    // Проверяем наличие таблицы в памяти ИЛИ на диске
-    if (tables.find(stmt.table_name) != tables.end() || std::filesystem::exists(file_path)) {
-        throw std::runtime_error("Ошибка: Таблица '" + stmt.table_name + "' уже существует в базе данных '" + db_name + "'.");
+    if (tables.count(stmt.table_name)) {
+        throw std::runtime_error("Ошибка: таблица '" + stmt.table_name + "' уже существует в базе данных '" + db_name + "'.");
     }
-    
     tables[stmt.table_name] = std::make_unique<Table>(stmt.table_name, stmt, root_dir);
-    std::cout << "[ОК] Таблица '" << stmt.table_name << "' успешно создана.\n";
 }
 
 void Database::dropTable(const std::string& table_name) {
-    std::string data_file_path = root_dir + "/" + table_name + ".db";
-    bool in_memory = (tables.find(table_name) != tables.end());
-    bool on_disk = std::filesystem::exists(data_file_path);
-
-    // Если таблицы нет ни в ОЗУ, ни на диске — выдаем ошибку
-    if (!in_memory && !on_disk) {
-        throw std::runtime_error("Ошибка: Таблица '" + table_name + "' не существует.");
+    auto it = tables.find(table_name);
+    if (it == tables.end()) {
+        throw std::runtime_error("Ошибка: таблица '" + table_name + "' не существует в базе данных '" + db_name + "'.");
     }
 
-    // 1. Удаляем основной файл таблицы (.db)
-    if (on_disk) {
-        std::filesystem::remove(data_file_path);
-    }
+    std::vector<std::string> files = it->second->filePaths();
 
-    // 2. Удаляем все возможные файлы индексов для этой таблицы (*.idx)
-    // Сканируем директорию базы на наличие файлов вида "tablename_*.idx"
-    for (const auto& entry : std::filesystem::directory_iterator(root_dir)) {
-        std::string filename = entry.path().filename().string();
-        if (filename.rfind(table_name + "_", 0) == 0 && entry.path().extension() == ".idx") {
-            std::filesystem::remove(entry.path());
-        }
-    }
+    tables.erase(it);
 
-    // 3. Удаляем из оперативной памяти
-    if (in_memory) {
-        tables.erase(table_name);
+    for (const auto& path : files) {
+        std::error_code ec;
+        fs::remove(path, ec);
     }
-
-    std::cout << "[ОК] Таблица '" << table_name << "' успешно удалена.\n";
 }
 
-Table* Database::getTable(const std::string& name) {
+Table& Database::getTable(const std::string& name) {
     auto it = tables.find(name);
     if (it == tables.end()) {
-        throw std::runtime_error("Ошибка: Таблица '" + name + "' не найдена в текущей базе данных.");
+        throw std::runtime_error("Ошибка: таблица '" + name + "' не найдена в базе данных '" + db_name + "'.");
     }
-    return it->second.get();
-}
-
-std::string Database::getName() const {
-    return db_name;
-}
-
-const std::string& Database::getRootDir() const {
-    return root_dir;
+    return *it->second;
 }
