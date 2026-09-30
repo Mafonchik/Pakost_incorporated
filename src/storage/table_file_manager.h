@@ -6,16 +6,8 @@
 #include <vector>
 #include "row.h"
 
-// Слой физического хранения таблицы. Единственное место, которое знает формат файла данных (.db):
-//
-//   файл  := строка*
-//   строка := [uint32 число полей] { поле }*
-//   поле   := [uint8 флаг NULL: 1 = NULL] и, если не NULL, [uint32 длина][байты значения]
-//
-// Смещение строки (FileOffset в индексе) — позиция её первого байта в файле.
 class TableFileManager {
 public:
-    // Чтение строк: последовательное (next) или по смещению из индекса (readAt)
     class Reader {
         std::ifstream in_;
     public:
@@ -30,9 +22,6 @@ public:
         uint64_t position() { return static_cast<uint64_t>(in_.tellg()); }
     };
 
-    // Переписывание файла: строки пишутся во временный файл <path>.tmp,
-    // commit() атомарно подменяет им исходный файл. Если commit() не вызван
-    // (в том числе при исключении) — временный файл удаляется деструктором.
     class Writer {
         std::string target_;
         std::string tmp_;
@@ -60,17 +49,13 @@ public:
     void createEmpty() const;              // создать/обнулить файл
     void removeFiles() const noexcept;     // удалить файл данных и временный файл
 
-    // Восстановление после сбоя: если в конце файла осталась оборванная запись
-    // (процесс упал посреди записи), отсекает её. true — хвост был отброшен.
     bool truncateToValidPrefix() const;
 
-    // Дописывает строки в конец файла одной операцией записи.
-    // Возвращает смещение каждой строки. При ошибке ввода-вывода бросает std::runtime_error.
     std::vector<uint64_t> appendRows(const std::vector<Row>& rows);
 
     Reader openReader() const { return Reader(path_); }
 
-    // Обход всех строк: fn(offset, row)
+
     template <class F>
     void scan(F&& fn) const {
         Reader reader = openReader();

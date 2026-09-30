@@ -55,7 +55,7 @@ bool deserialize(std::istream& in, Row& row) {
     return true;
 }
 
-} // namespace
+}
 
 // ---------- Reader ----------
 
